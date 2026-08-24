@@ -1,0 +1,101 @@
+name: Ping Render Keepalive
+
+# 每22分钟自动 Ping 一次 Render 后端，防止免费版休眠
+# Render 免费版休眠阈值：15分钟无入站请求
+# GitHub Actions cron 最小粒度：5分钟，调度可能有 5-15 分钟延迟
+# 频率选择：每22分钟 ≈ 每天65次 ≈ 每月1950分钟（私有仓库2000分钟免费额度内）
+
+on:
+  schedule:
+    # 每22分钟执行一次（分 时 日 月 周）
+    - cron: '*/22 * * * *'
+  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '触发原因（可选）'
+        required: false
+        default: 'manual'
+
+jobs:
+  ping:
+    name: Ping Render Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 2  # 最多2分钟，避免冷启动超时导致计费过长
+
+    steps:
+      - name: 🔍 检查配置
+        run: |
+          if [ -z "${{ secrets.RENDER_URL }}" ]; then
+            echo "::error::未配置 RENDER_URL Secret！请在仓库 Settings → Secrets and variables → Actions 中添加 RENDER_URL"
+            echo "示例: https://your-backend.onrender.com"
+            exit 1
+          fi
+          echo "目标地址: ${{ secrets.RENDER_URL }}"
+
+      - name: 📡 发送 Ping 请求
+        id: ping
+        run: |
+          URL="${{ secrets.RENDER_URL }}"
+          # 优先 ping /api/products（轻量端点，同时触发后端初始化）
+          # 如果该端点不存在，curl 会返回 404 但仍能唤醒 Render
+          PING_URL="${URL}/api/products"
+
+          echo "请求地址: $PING_URL"
+          echo "开始时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+
+          START=$(date +%s%N)
+
+          # curl 参数说明：
+          # -s 静默模式
+          # -o /dev/null 不输出响应体
+          # -w 输出指定格式
+          # --max-time 45 最多等待45秒（Render冷启动可能需要30-60秒）
+          # --retry 2 失败重试2次
+          # --retry-delay 5 重试间隔5秒
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 45 \
+            --retry 2 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            "$PING_URL" 2>/dev/null || echo "000")
+
+          END=$(date +%s%N)
+          ELAPSED_MS=$(( (END - START) / 1000000 ))
+
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+          echo "elapsed_ms=$ELAPSED_MS" >> "$GITHUB_OUTPUT"
+
+          echo "HTTP 状态码: $HTTP_CODE"
+          echo "响应耗时: ${ELAPSED_MS}ms"
+
+          # 判断结果
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "304" ] || [ "$HTTP_CODE" = "404" ]; then
+            echo "✅ Ping 成功（Render 已响应）"
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          elif [ "$HTTP_CODE" = "000" ]; then
+            echo "⚠️  请求超时或连接失败（Render 可能正在冷启动，下次 Ping 会成功）"
+            echo "result=timeout" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️  意外状态码: $HTTP_CODE（但 Render 已被唤醒）"
+            echo "result=warning" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 📊 输出结果摘要
+        run: |
+          echo "========================================"
+          echo "  Render Keepalive Ping 结果"
+          echo "========================================"
+          echo "时间: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "目标: ${{ secrets.RENDER_URL }}"
+          echo "状态码: ${{ steps.ping.outputs.http_code }}"
+          echo "耗时: ${{ steps.ping.outputs.elapsed_ms }}ms"
+          echo "结果: ${{ steps.ping.outputs.result }}"
+          echo "========================================"
+
+      - name: 💾 记录 Ping 历史（可选）
+        if: always()
+        run: |
+          # 将最近一次 Ping 结果追加到日志（仅在当前工作流运行内有效）
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] HTTP=${{ steps.ping.outputs.http_code }} Time=${{ steps.ping.outputs.elapsed_ms }}ms Result=${{ steps.ping.outputs.result }}" >> ping-history.log
+          cat ping-history.log
