@@ -8,7 +8,7 @@ name: Ping Render Keepalive
 on:
   schedule:
     # 每22分钟执行一次（分 时 日 月 周）
-    - cron: '*/22 * * * *'
+    - cron: '*/13 * * * *'
   # 支持手动触发
   workflow_dispatch:
     inputs:
